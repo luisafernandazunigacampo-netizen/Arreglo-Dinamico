@@ -1,0 +1,345 @@
+/**
+ * lab_segmentacion.c
+ * Laboratorio: Simulación de Memoria Virtual con Segmentación
+ *
+ * Sistemas Operativos
+ * Referencia: Stallings, Cap. 8 | Tanenbaum, Cap. 3.4
+ *
+ * Compilar: gcc -ansi -Wall -o lab_seg lab_segmentacion.c
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+
+/* ── Constantes ─────────────────────────────────────────*/
+#define MAX_SEGMENTS    8      /* Máximo de segmentos por proceso */
+#define MEM_SIZE        65536  /* Memoria física total: 64 KB     */
+
+/* ── Permisos de segmento (bitmask) ─────────────────────*/
+#define SEG_READ    0x01  /* Permiso de lectura  */
+#define SEG_WRITE   0x02  /* Permiso de escritura */
+#define SEG_EXEC    0x04  /* Permiso de ejecución */
+
+/* ── Estructura de entrada en la tabla de segmentos ─────
+ * Cada entrada describe un segmento lógico del proceso.
+ * Stallings, Fig. 8.12 | Tanenbaum, Fig. 3-29
+ */
+typedef struct {
+    unsigned long base;    /* Dirección física de inicio del segmento */
+    unsigned long limit;   /* Tamaño máximo del segmento (en bytes)   */
+    int           valid;   /* 1 = segmento válido/cargado, 0 = inválido */
+    int           perms;   /* Bitmask de permisos */
+    char          name[16]; /* Nombre descriptivo */
+} SegmentEntry;
+
+/* ── Tabla de segmentos del proceso ─────────────────────*/
+SegmentEntry seg_table[MAX_SEGMENTS];
+int          num_segments = 0;
+
+/* ── Estadísticas ───────────────────────────────────────*/
+int total_accesses    = 0;
+int seg_faults        = 0;
+int protection_errors = 0;
+
+/* ── Prototipos ──────────────────────────────────────────*/
+void init_seg_table(void);
+int add_segment(unsigned long base, unsigned long limit,
+                int perms, const char *name);
+long translate_seg_address(int seg_num, unsigned long offset,
+                           int access_type);
+void print_seg_table(void);
+void print_stats(void);
+
+/* ════════════════════════════════════════════════════════
+ * FUNCIÓN: init_seg_table
+ * Inicializa la tabla de segmentos vacía.
+ * ════════════════════════════════════════════════════════*/
+void init_seg_table(void) {
+    int i;
+
+    for (i = 0; i < MAX_SEGMENTS; i++) {
+        seg_table[i].valid = 0;
+        seg_table[i].base  = 0;
+        seg_table[i].limit = 0;
+        seg_table[i].perms = 0;
+        seg_table[i].name[0] = '\0';
+    }
+
+    num_segments = 0;
+}
+
+/* ════════════════════════════════════════════════════════
+ * FUNCIÓN: add_segment
+ * Agrega un nuevo segmento a la tabla.
+ * ════════════════════════════════════════════════════════*/
+int add_segment(unsigned long base, unsigned long limit,
+                int perms, const char *name) {
+    int idx;
+
+    /* Verificar que haya espacio en la tabla */
+    if (num_segments >= MAX_SEGMENTS) {
+        printf("[ERROR] Tabla de segmentos llena.\n");
+        return -1;
+    }
+
+    /*
+     * Verificar que base + limit no supere la memoria física.
+     *
+     * Como limit representa el mayor offset válido,
+     * la condición correcta es >= MEM_SIZE.
+     */
+    if (base + limit >= MEM_SIZE) {
+        printf("[ERROR] El segmento supera la memoria física.\n");
+        return -1;
+    }
+
+    /* Verificar que el segmento no sea vacío */
+    if (limit == 0) {
+        printf("[ERROR] El segmento no puede tener límite 0.\n");
+        return -1;
+    }
+
+    idx = num_segments++;
+
+    seg_table[idx].base  = base;
+    seg_table[idx].limit = limit;
+    seg_table[idx].perms = perms;
+    seg_table[idx].valid = 1;
+
+    /* Copiar nombre de forma segura */
+    snprintf(seg_table[idx].name,
+             sizeof(seg_table[idx].name),
+             "%s",
+             name);
+
+    printf("[SEG] Segmento %d '%s': base=0x%05lX, límite=0x%05lX\n",
+           idx, name, base, limit);
+
+    return idx;
+}
+
+/* ════════════════════════════════════════════════════════
+ * FUNCIÓN: translate_seg_address
+ * Traduce una dirección lógica (segmento + offset) a física.
+ * ════════════════════════════════════════════════════════*/
+long translate_seg_address(int seg_num,
+                           unsigned long offset,
+                           int access_type) {
+    long physical_addr;
+
+    total_accesses++;
+
+    printf("\n[TRADUCCION] Seg=%d, Offset=0x%05lX, Acceso=%s\n",
+           seg_num,
+           offset,
+           (access_type == SEG_READ)  ? "LECTURA" :
+           (access_type == SEG_WRITE) ? "ESCRITURA" :
+                                        "EJECUCION");
+
+    /* Verificar número de segmento válido */
+    if (seg_num < 0 ||
+        seg_num >= num_segments ||
+        !seg_table[seg_num].valid) {
+
+        printf("[SEG FAULT] Segmento %d no existe o es inválido.\n",
+               seg_num);
+
+        seg_faults++;
+
+        return -1;
+    }
+
+    /* Verificar que offset <= límite */
+    if (offset > seg_table[seg_num].limit) {
+
+        printf("[SEG FAULT] Offset 0x%lX > Límite 0x%lX "
+               "en segmento %d ('%s').\n",
+               offset,
+               seg_table[seg_num].limit,
+               seg_num,
+               seg_table[seg_num].name);
+
+        seg_faults++;
+
+        return -1;
+    }
+
+    /* Verificar permisos de acceso */
+    if ((seg_table[seg_num].perms & access_type) == 0) {
+
+        printf("[PROTECCION] Acceso %s denegado "
+               "en segmento '%s'.\n",
+               (access_type == SEG_READ)  ? "de lectura" :
+               (access_type == SEG_WRITE) ? "de escritura" :
+                                            "de ejecución",
+               seg_table[seg_num].name);
+
+        protection_errors++;
+
+        return -1;
+    }
+
+    /* Calcular dirección física */
+    physical_addr = seg_table[seg_num].base + offset;
+
+    printf("[OK] Dir. física: 0x%05lX "
+           "(base 0x%05lX + offset 0x%05lX)\n",
+           physical_addr,
+           seg_table[seg_num].base,
+           offset);
+
+    return physical_addr;
+}
+
+/* ════════════════════════════════════════════════════════
+ * FUNCIÓN: print_seg_table
+ * Imprime la tabla de segmentos.
+ * ════════════════════════════════════════════════════════*/
+void print_seg_table(void) {
+    int i;
+
+    printf("\n╔═══════════════════════════════════════════════════════════╗\n");
+    printf("║            TABLA DE SEGMENTOS (proceso P1)              ║\n");
+    printf("╠═════╦══════════╦══════════════╦══════════════╦═══════════╣\n");
+    printf("║ Seg ║  Nombre  ║     Base     ║    Límite    ║  Permisos ║\n");
+    printf("╠═════╬══════════╬══════════════╬══════════════╬═══════════╣\n");
+
+    for (i = 0; i < num_segments; i++) {
+        printf("║  %d  ║ %-8s ║   0x%05lX   ║   0x%05lX   ║   %c%c%c     ║\n",
+               i,
+               seg_table[i].name,
+               seg_table[i].base,
+               seg_table[i].limit,
+               (seg_table[i].perms & SEG_READ)  ? 'R' : '-',
+               (seg_table[i].perms & SEG_WRITE) ? 'W' : '-',
+               (seg_table[i].perms & SEG_EXEC)  ? 'X' : '-');
+    }
+
+    printf("╚═════╩══════════╩══════════════╩══════════════╩═══════════╝\n");
+}
+
+/* ════════════════════════════════════════════════════════
+ * FUNCIÓN: print_stats
+ * Muestra estadísticas finales.
+ * ════════════════════════════════════════════════════════*/
+void print_stats(void) {
+    printf("\n══════ ESTADÍSTICAS ══════\n");
+
+    printf("Accesos totales   : %d\n",
+           total_accesses);
+
+    printf("Seg faults        : %d\n",
+           seg_faults);
+
+    printf("Errores protección: %d\n",
+           protection_errors);
+
+    printf("Accesos válidos   : %d\n",
+           total_accesses -
+           seg_faults -
+           protection_errors);
+}
+
+/* ════════════════════════════════════════════════════════
+ * MAIN — Configuración y casos de prueba
+ * ════════════════════════════════════════════════════════*/
+int main(void) {
+
+    printf("════════════════════════════════════════════════════\n");
+    printf("  Laboratorio: Segmentación – Sistemas Operativos   \n");
+    printf("════════════════════════════════════════════════════\n");
+
+    /* Inicializar tabla */
+    init_seg_table();
+
+    /* ── Definir segmentos del proceso ──────────────────
+     * add_segment(base_física, límite, permisos, nombre)
+     */
+
+    /* Segmento 0: código */
+    add_segment(0x4000,
+                0x0FFF,
+                SEG_READ | SEG_EXEC,
+                "codigo");
+
+    /* Segmento 1: datos */
+    add_segment(0x1000,
+                0x07FF,
+                SEG_READ | SEG_WRITE,
+                "datos");
+
+    /* Segmento 2: pila */
+    add_segment(0x9000,
+                0x0FFF,
+                SEG_READ | SEG_WRITE,
+                "pila");
+
+    /* Segmento 3: heap */
+    add_segment(0xB000,
+                0x07FF,
+                SEG_READ | SEG_WRITE,
+                "heap");
+
+    /* Mostrar tabla */
+    print_seg_table();
+
+    /* ── Secuencia de accesos de prueba ─────────────────*/
+
+    /* Acceso válido: lectura en segmento de código */
+    translate_seg_address(0,
+                          0x0100,
+                          SEG_READ);
+
+    /* Acceso válido: escritura en segmento de datos */
+    translate_seg_address(1,
+                          0x0200,
+                          SEG_WRITE);
+
+    /* Violación de segmento: offset > límite en datos */
+    translate_seg_address(1,
+                          0x0900,
+                          SEG_READ);
+
+    /* Violación de protección:
+       escritura en segmento de código */
+    translate_seg_address(0,
+                          0x0050,
+                          SEG_WRITE);
+
+    /* Segmento inválido */
+    translate_seg_address(5,
+                          0x0010,
+                          SEG_READ);
+
+    /* ── Parte 3: accesos adicionales ───────────────────*/
+
+    /* Acceso válido de ejecución en código */
+    translate_seg_address(0,
+                          0x0020,
+                          SEG_EXEC);
+
+    /* Acceso válido de lectura en la pila */
+    translate_seg_address(2,
+                          0x0050,
+                          SEG_READ);
+
+    /* Acceso válido de escritura en la pila */
+    translate_seg_address(2,
+                          0x0100,
+                          SEG_WRITE);
+
+    /* Violación de segmento en la pila */
+    translate_seg_address(2,
+                          0x2000,
+                          SEG_READ);
+
+    /* Acceso válido al cuarto segmento: heap */
+    translate_seg_address(3,
+                          0x0100,
+                          SEG_READ);
+
+    /* Mostrar estadísticas */
+    print_stats();
+
+    return 0;
+}
