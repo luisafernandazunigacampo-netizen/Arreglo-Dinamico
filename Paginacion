@@ -249,6 +249,7 @@ long translate_address(long logical_addr, int write_access) {
      *
      * Reemplaza el return siguiente con tu implementación:
      */
+
     physical_addr =
         ((long)page_table[page_num].frame_number * PAGE_SIZE) + offset;
 
@@ -261,6 +262,7 @@ long translate_address(long logical_addr, int write_access) {
     printf("[RESULTADO] Dir. física: 0x%05lX\n", physical_addr);
     return physical_addr;
 }
+
 
 /* ════════════════════════════════════════════════════════
  * FUNCIÓN: print_page_table
